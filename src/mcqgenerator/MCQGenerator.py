@@ -1,60 +1,73 @@
 import os
-import json
-import traceback
-import pandas as pd
 from dotenv import load_dotenv
-from src.mcqgenerator.utils import read_file,get_table_data
+
+from src.mcqgenerator.utils import read_file, get_table_data
 from src.mcqgenerator.logger import logging
 
-# from langchain_openai import ChatOpenAI
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain,SequentialChain
+from langchain_core.runnables import RunnableSequence
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
+# Load environment variables
 load_dotenv()
-key=os.getenv("OPENAI_API_KEY")
-llm=ChatOpenAI(openai_api_key=key,model_name="gpt-3.5-turbo",temperature=0.7)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-template="""
-Text:{text}
-You are expert MCQ Maker. Given above text, it is your job to \
-create quiz of {number} multiple choice questions for {subject} students in {tone} tone.
-Make sure questions are not repeated and check all the questions to be confirming the text as well.
-Make sure to format your response like RESPONSE_JSON below and use it as a guide.\
-Ensure to make {number} MCQs
+# Initialize LLM
+llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    temperature=0.7,
+    api_key=OPENAI_API_KEY
+)
+
+# Step 1: Prompt to generate MCQs
+quiz_generation_prompt = PromptTemplate.from_template("""
+Text:
+{text}
+
+You are an expert MCQ Maker. Given the above text, your job is to \
+create a quiz of {number} multiple choice questions for {subject} students in a {tone} tone.
+
+- Ensure the questions are **not repeated**.
+- Ensure each question is supported by the input text.
+- Follow this exact structure for the output:
 ### RESPONSE_JSON
 {response_json}
-"""
 
-quiz_generation_prompt=PromptTemplate(
-    input_variables=["text","number","subject","tone","response_json"],
-    template=template
-)
+Return only the JSON content in the format shown above.
+""")
 
-quiz_chain=LLMChain(llm=llm,prompt=quiz_generation_prompt,output_key="quiz",verbose=True)
+quiz_generation_chain = quiz_generation_prompt | llm | StrOutputParser()
 
-template2="""
-You are an expert english grammarian and writer. Given a Multiple Choice Quiz for {subject} students.\
-You need to evaluate the complexity of the question and give a complete analysis of the quiz. Only use at max 50 words for complexity analysis. 
-if the quiz is not at per with the cognitive and analytical abilities of the students,\
-update the quiz questions which needs to be changed and change the tone such that it perfectly fits the student abilities
-Quiz_MCQs:
+# Step 2: Prompt to evaluate the quiz
+quiz_evaluation_prompt = PromptTemplate.from_template("""
+You are an expert English grammarian and educator. Given a Multiple Choice Quiz designed for {subject} students:
+
+1. Evaluate the **complexity and appropriateness** of each question.
+2. Provide a short **50-word analysis** of the quiz.
+3. If needed, **modify questions or tone** to better match the student level.
+
+Quiz:
 {quiz}
 
-Check from an expert English Writer of the above quiz:
-"""
+Provide your expert review below:
+""")
 
-quiz_evaluation_prompt=PromptTemplate(
-    input_variables=["subject","quiz"],
-    template=template2
+quiz_evaluation_chain = quiz_evaluation_prompt | llm | StrOutputParser()
+
+# Combined sequential chain using RunnableSequence
+generate_evaluate_chain = RunnableSequence(
+    steps=[
+        {
+            "quiz": quiz_generation_chain
+        },
+        {
+            "review": lambda x: quiz_evaluation_chain.invoke({
+                "subject": x["subject"],
+                "quiz": x["quiz"]
+            }),
+            "quiz": lambda x: x["quiz"]
+        }
+    ]
 )
-
-review_chain=LLMChain(llm=llm,prompt=quiz_evaluation_prompt,output_key="review",verbose=True)
-
-generate_evaluate_chain=SequentialChain(
-    chains=[quiz_chain,review_chain],
-    input_variables=["text","number","subject","tone","response_json"],
-    output_variables=["quiz","review"],
-    verbose=True
-)
-
